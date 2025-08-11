@@ -12,7 +12,7 @@ The objective of this project is to demonstrate a comprehensive A/B testing work
 
 ## 📈 Methodology
 
-    Data Simulation & Cleaning: A dataset of approximately 294,000 users was simulated to model an A/B test experiment. The data was inspected for integrity and prepared for analysis.
+    Experiment Simulation & Data Cleaning: An experiment for a dataset of approximately 294,000 users was simulated to model an A/B test experiment. The data was inspected for integrity and prepared for analysis.
 
     Frequentist Analysis: Classical hypothesis testing was performed using a p-value and a confidence interval to determine the statistical significance of the results.
 
@@ -68,7 +68,7 @@ However, an expanded segmented analysis by country revealed nuanced regional per
 
     data/ – The datasets used for the A/B test.
 
-    src/ – The core R script (main.R) containing the complete analysis workflow.
+    src/ – The core modular R scripts: (main.R, frequentist.R, bayesian.R, etc) containing the complete analysis workflow.
 
     report/ – The full analytical report in PDF format.
 
@@ -82,7 +82,7 @@ However, an expanded segmented analysis by country revealed nuanced regional per
 
     Run the main script src/main.R to execute the full analysis.
 
-    Ensure the required packages (tidyverse) are installed. The script will guide you to the dataset.
+    Ensure the required packages (tidyverse) are installed.
 
 ---
 
