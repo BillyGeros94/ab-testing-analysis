@@ -37,6 +37,8 @@ vignettes/*.pdf
 
 # R Environment Variables
 .Renviron
+library/
+staging/
 
 # pkgdown site
 docs/
