@@ -1,14 +1,14 @@
-source("./load_data.R")
-source("./data_prep.R")
-source("./frequentist.R")
-source("./bayesian.R")
-source("./expanded.R")
+source("src/load_data.R")
+source("src/data_prep.R")
+source("src/frequentist.R")
+source("src/bayesian.R")
+source("src/expanded.R")
 
 # Install and load packages
 install_and_load(packages)
 
 # Load the data
-ab_data <- load_data(file_path = "../data/ab_data.csv")
+ab_data <- load_data(file_path = "data/ab_data.csv")
 
 ## ----------------- INITIAL DATA INSPECTION -----------------
 
@@ -190,7 +190,7 @@ ggplot(as.data.frame(bayesian_results$diff), aes(x = bayesian_results$diff)) +
 ## ----------------- EXPANDED ANALYSIS -----------------
 
 # Read the file
-countries <- load_data(file_path = "../data/countries.csv")
+countries <- load_data(file_path = "data/countries.csv")
 
 # Transform to factors
 countries <- countries|>
