@@ -26,18 +26,19 @@ Frequentist test: no statistically significant lift (p ≈ 0.19). Bayesian poste
 
 ---
 
-## How to reproduce (one command)
+## How to reproduce
 
 From the project root:
 
-```bash
-Rscript src/main.R
-```
-This project uses `renv` for R package management. Run:
-
+1. **Restore R environment**:
 ```r
 R -e "renv::restore()"
 ``` 
+
+2. **Run the analysis script**:
+```bash
+Rscript src/main.R
+```
 
 **R version used**: 4.5.1 (recorded in `renv.lock`)
 
