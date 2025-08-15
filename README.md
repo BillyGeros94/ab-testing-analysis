@@ -33,6 +33,13 @@ From the project root:
 ```bash
 Rscript src/main.R
 ```
+This project uses `renv` for R package management. Run:
+
+```r
+R -e "renv::restore()"
+``` 
+
+**R version used**: 4.5.1 (recorded in `renv.lock`)
 
 Expected outputs: `report/Project - Report.pdf` and `presentation/Project-Presentation.pptx`.
 
