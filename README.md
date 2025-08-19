@@ -42,7 +42,7 @@ Rscript src/main.R
 
 **R version used**: 4.5.1 (recorded in `renv.lock`)
 
-Expected outputs: `report/Project - Report.pdf` and `presentation/Project-Presentation.pptx`.
+Expected outputs: `report/AB Test Report.pdf` and `presentation/AB Test Presentation.pptx`.
 
 ---
 
@@ -60,7 +60,7 @@ Expected outputs: `report/Project - Report.pdf` and `presentation/Project-Presen
 
 - Fixed-horizon experiment — no sequential/peeking corrections applied.
 - Deduplication rule: earliest timestamp retained per user.
-- Conversion attribution window and business-specific adjustments are documented in `report/Project - Report.pdf`.
+- Conversion attribution window and business-specific adjustments are documented in `report/AB Test Report.pdf`.
 - Priors: Beta(1,1) used for clarity; no prior sensitivity analysis is in the headline results.
 
 ---
