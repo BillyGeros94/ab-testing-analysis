@@ -45,3 +45,5 @@ docs/
 
 # translation temp files
 po/*~
+# Plots written by non-interactive Rscript runs
+Rplots.pdf

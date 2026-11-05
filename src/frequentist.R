@@ -59,6 +59,10 @@ frequentist <- function(data, n_control, n_treatment) {
 
     # Return results in a list
     results <- list(
+      conv_control = pc,
+      conv_treatment = pt,
+      delta = pt - pc,
+      mde = mde,
       min_sample_size = n,
       z_score = z,
       p_value = p_value,

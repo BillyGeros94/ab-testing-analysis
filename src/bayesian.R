@@ -38,8 +38,15 @@ bayesian <- function(data, n_control, n_treatment) {
     cat("\nROPE: [", rope_lower, ",", rope_upper, "]\n")
     cat("\nROPE coverage:", rc, "\n")
 
+    # Probability that the lift reaches the planned MDE
+    p_mde <- mean(diff >= 0.0075)
+
+    # Print
+    cat("\nProbability that the lift reaches the MDE:", p_mde, "\n")
+
     # Return results in a list
     results <- list(
+      p_mde = p_mde,
       diff = diff,
       delta = delta,
       cred_int = cred_int,

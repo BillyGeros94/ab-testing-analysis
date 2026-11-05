@@ -3,9 +3,13 @@ source("src/data_prep.R")
 source("src/frequentist.R")
 source("src/bayesian.R")
 source("src/expanded.R")
+source("src/checks.R")
 
 # Install and load packages
 install_and_load(packages)
+
+# Make the Monte Carlo results repeatable
+set.seed(42)
 
 # Load the data
 ab_data <- load_data(file_path = "data/ab_data.csv")
@@ -31,6 +35,7 @@ print(colSums(is.na(ab_data)))
 ## ----------------- DATA PREPARATION -----------------
 
 cat("\n--- Data Preparation ---\n")
+ab_raw <- ab_data
 ab_data <- prepare_data(ab_data)
 
 # Clean Data summary
@@ -140,14 +145,21 @@ ab_data |>
   theme_minimal() +
   theme(plot.title = element_text(hjust = 0.5))
 
-## ----------------- FREQUENTIS ANALYSIS ----------------
+## ----------------- VALIDITY CHECKS -----------------
+
+cat("\n--- Validity checks ---\n")
+srm_p <- srm_check(ab_data)
+weekly_results <- weekly_effect(ab_data)
+both_pages_results <- both_pages_sensitivity(ab_raw, ab_data)
+
+## ----------------- FREQUENTIST ANALYSIS ----------------
 
 # Samples
 n_control <- length(ab_data$group[ab_data$group == "control"])
 n_treatment <- length(ab_data$group[ab_data$group == "treatment"])
 
 # Frequentist results
-cat("\n--- Frequentis analysis ---\n")
+cat("\n--- Frequentist analysis ---\n")
 frequentist_results <- frequentist(ab_data, n_control, n_treatment)
 
 ## ----------------- BAYESIAN ANALYSIS ----------------
@@ -162,7 +174,7 @@ ab_data |>
   scale_fill_manual(values = c("control" = "coral", "treatment" = "skyblue")) +
   geom_text(aes(label = conversions), vjust = -0.5) + 
   labs(
-    title = "Total Coversions per Group", x = "Group",
+    title = "Total Conversions per Group", x = "Group",
     y = "Conversions", fill = "Group") +
   theme_minimal() +
   theme(plot.title = element_text(hjust = 0.5), panel.grid.major = element_blank(),
@@ -263,3 +275,39 @@ expanded_plots$UK
 
 # Posterior difference distribution (CA)
 expanded_plots$CA
+
+# Frequentist tests per country
+country_results <- country_tests(ab_data_exp)
+
+## ----------------- SAVE KEY NUMBERS -----------------
+
+key_numbers <- tibble(
+  metric = c(
+    "rows_raw", "users", "n_control", "n_treatment",
+    "conv_rate_control", "conv_rate_treatment", "delta",
+    "z_score", "p_value", "ci_lower", "ci_upper", "mde",
+    "min_sample_size_per_group", "srm_p_value",
+    "bayes_p_treatment_better", "bayes_p_reaches_mde", "rope_coverage",
+    "cred_lower", "cred_upper",
+    "both_pages_users_removed", "both_pages_delta", "both_pages_p_value",
+    "both_pages_ci_lower", "both_pages_ci_upper",
+    "country_interaction_p_value"
+  ),
+  value = c(
+    nrow(ab_raw), nrow(ab_data), n_control, n_treatment,
+    frequentist_results$conv_control, frequentist_results$conv_treatment,
+    frequentist_results$delta, frequentist_results$z_score,
+    frequentist_results$p_value, frequentist_results$conf_interval,
+    frequentist_results$mde, frequentist_results$min_sample_size, srm_p,
+    bayesian_results$delta, bayesian_results$p_mde, bayesian_results$rc,
+    unname(bayesian_results$cred_int),
+    both_pages_results$users_removed, both_pages_results$delta,
+    both_pages_results$p_value, both_pages_results$conf_interval,
+    country_results$interaction_p
+  )
+)
+
+dir.create("results", showWarnings = FALSE)
+write_csv(key_numbers, "results/key_numbers.csv")
+write_csv(country_results$per_country, "results/country_tests.csv")
+write_csv(weekly_results, "results/weekly_effect.csv")
