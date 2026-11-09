@@ -1,4 +1,6 @@
-bayesian <- function(data, n_control, n_treatment) {
+# Beta-Binomial comparison of the two groups. mde is the planned lift and rope
+# the half-width of the region of practical equivalence around zero.
+bayesian <- function(data, n_control, n_treatment, mde = 0.0075, rope = 0.003) {
 
     # Posterior parameters for A
     alpha_A <- 1 + sum(data$converted[data$group == "control"])
@@ -10,7 +12,7 @@ bayesian <- function(data, n_control, n_treatment) {
 
     # Bayesian Analysis Sampling
     samples_A <- rbeta(100000, alpha_A, beta_A)
-    samples_B <- rbeta(100000, alpha_B, beta_B)  
+    samples_B <- rbeta(100000, alpha_B, beta_B)
 
     # Difference in conversion rate
     diff <- samples_B - samples_A
@@ -19,7 +21,7 @@ bayesian <- function(data, n_control, n_treatment) {
     delta <- mean(diff > 0)
 
     # Print
-    cat("\nProbability that B is better than A:", delta,"\n")
+    cat("\nProbability that B is better than A:", delta, "\n")
 
     # 95% credible interval
     cred_int <- quantile(diff, c(0.025, 0.975))
@@ -27,19 +29,15 @@ bayesian <- function(data, n_control, n_treatment) {
     # Print
     cat("\n95% credible intervals:[", cred_int, "]", "\n")
 
-    # ROPE bounds
-    rope_lower <- -0.003
-    rope_upper <-  0.003
-
     # ROPE coverage
-    rc <- sum(diff > - 0.003 & diff < 0.003) / length(diff)
+    rc <- mean(diff > -rope & diff < rope)
 
     # Print
-    cat("\nROPE: [", rope_lower, ",", rope_upper, "]\n")
+    cat("\nROPE: [", -rope, ",", rope, "]\n")
     cat("\nROPE coverage:", rc, "\n")
 
     # Probability that the lift reaches the planned MDE
-    p_mde <- mean(diff >= 0.0075)
+    p_mde <- mean(diff >= mde)
 
     # Print
     cat("\nProbability that the lift reaches the MDE:", p_mde, "\n")

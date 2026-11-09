@@ -1,0 +1,438 @@
+---
+pagetitle: "A/B Testing Analysis Using Frequentist and Bayesian Inference"
+output:
+  html_document:
+    theme: null
+    highlight: null
+    mathjax: null
+    css: report.css
+    section_divs: false
+    fig_caption: false
+    self_contained: true
+    md_extensions: -tex_math_dollars
+---
+
+```{r setup, include = FALSE}
+# Render with: Rscript report/render.R (from the project root). Every number and
+# chart below is computed here from the data, using the functions in src/.
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
+                      fig.width = 9, fig.height = 4.65, dpi = 150, out.width = "100%")
+library(tidyverse)
+
+source("src/load_data.R")
+source("src/data_prep.R")
+source("src/frequentist.R")
+source("src/bayesian.R")
+source("src/expanded.R")
+source("src/checks.R")
+source("src/plots.R")
+
+# The same steps in the same order as src/main.R, so the seeded Monte Carlo
+# results match results/. capture.output hides the functions' console printing.
+set.seed(42)
+invisible(capture.output({
+  ab_raw <- load_data("data/ab_data.csv")
+  ab_data <- prepare_data(ab_raw)
+  srm_p <- srm_check(ab_data)
+  weekly <- weekly_effect(ab_data)
+  both_pages <- both_pages_sensitivity(ab_raw, ab_data)
+  n_control <- sum(ab_data$group == "control")
+  n_treatment <- sum(ab_data$group == "treatment")
+  fr <- frequentist(ab_data, n_control, n_treatment)
+  bay <- bayesian(ab_data, n_control, n_treatment, mde = fr$mde)
+  countries <- load_data("data/countries.csv") |> mutate(country = factor(country))
+  ab_data_exp <- inner_join(ab_data, countries, by = "user_id")
+  country_names <- c("US", "UK", "CA")
+  by_country <- list()
+  for (name in country_names) by_country[[name]] <- expanded(ab_data_exp, name, mde = fr$mde)
+  country_freq <- country_tests(ab_data_exp)
+}))
+
+# ---- Formatting helpers: a real minus sign, fixed decimals ----
+fmt <- function(x, digits, plus = FALSE) {
+  gsub("-", "−", formatC(x, format = "f", digits = digits, flag = if (plus) "+" else ""))
+}
+pct <- function(x, digits = 2) paste0(fmt(100 * x, digits), "%")
+pts <- function(x, digits = 2, plus = FALSE) fmt(100 * x, digits, plus)   # percentage points
+interval <- function(v, digits) paste0("[", fmt(v[1], digits, TRUE), ", ", fmt(v[2], digits, TRUE), "]")
+comma <- function(x) format(round(x), big.mark = ",", scientific = FALSE, trim = TRUE)
+day <- function(d) paste(format(d, "%B"), as.integer(format(d, "%d")))
+short_date <- function(d) paste0(format(d, "%b "), as.integer(format(d, "%d")), format(d, ", %Y"))
+whole <- function(x) format(x, scientific = FALSE, trim = TRUE)
+
+# ---- Raw data and cleaning ----
+n_raw <- nrow(ab_raw)
+n_users <- nrow(ab_data)
+mismatched <- ab_raw |> filter((group == "control") != (landing_page == "old_page"))
+control_mismatch <- sum(mismatched$group == "control")
+treatment_mismatch <- sum(mismatched$group == "treatment")
+affected <- ab_raw |>
+  semi_join(distinct(mismatched, user_id), by = "user_id") |>
+  group_by(user_id) |>
+  summarise(both_pages = n_distinct(landing_page) == 2)
+duplicate_ids <- ab_raw |>
+  filter((group == "control") == (landing_page == "old_page")) |>
+  count(user_id) |>
+  filter(n > 1) |>
+  pull(user_id)
+dates <- range(as_date(ab_raw$timestamp))
+n_days <- as.integer(diff(dates)) + 1
+
+# ---- Daily conversion peaks and lows ----
+daily <- ab_data |>
+  mutate(date = as_date(timestamp)) |>
+  group_by(group, date) |>
+  summarise(rate = mean(converted), .groups = "drop")
+extreme <- function(g, f) day(with(filter(daily, group == g), date[f(rate)]))
+
+# ---- Frequentist and Bayesian ----
+required_n <- ceiling(fr$min_sample_size)
+pooled <- mean(ab_data$converted)
+conv_c <- sum(ab_data$converted[ab_data$group == "control"])
+conv_t <- sum(ab_data$converted[ab_data$group == "treatment"])
+post_c <- c(1 + conv_c, 1 + n_control - conv_c)
+post_t <- c(1 + conv_t, 1 + n_treatment - conv_t)
+
+# ---- Countries ----
+freq_by_country <- country_freq$per_country |> column_to_rownames("country")
+uk <- freq_by_country["UK", ]
+
+# The text below states these conclusions in words. If the data or code ever
+# change so that one no longer holds, stop instead of printing a wrong sentence.
+stopifnot(
+  "treatment is no longer lower than control" = fr$delta < 0,
+  "the overall difference is now significant" = fr$p_value > 0.05,
+  "the confidence interval no longer includes zero" = fr$conf_interval[1] < 0 && fr$conf_interval[2] > 0,
+  "the confidence interval no longer rules out the MDE" = fr$conf_interval[2] < fr$mde,
+  "the groups are no longer above the required sample size" = min(n_control, n_treatment) > required_n,
+  "the sample ratio check now fails" = srm_p > 0.05,
+  "removing mismatched users now changes the result" = both_pages$p_value > 0.05 && both_pages$delta < 0,
+  "the weekly effect is no longer negative every week" = all(weekly$delta < 0),
+  "the posterior now favours the treatment" = bay$delta < 0.5,
+  "most of the posterior is no longer inside the ROPE" = bay$rc > 0.5,
+  "a country is now significant before correction" = all(country_freq$per_country$p_value > 0.05),
+  "the treatment x country interaction is now significant" = country_freq$interaction_p > 0.05
+)
+```
+
+# A/B Testing Analysis Using Frequentist and Bayesian Inference
+
+## 1. Executive Overview
+
+This project evaluates whether a newly designed landing page improves user conversion rates relative to the existing version. A randomized controlled A/B test was simulated from `r comma(n_raw)` logged rows, which after cleaning give `r comma(n_users)` unique users split almost exactly evenly between treatment (new page, `r comma(n_treatment)` users) and control (old page, `r comma(n_control)` users) groups over a `r n_days`-day period.
+
+The **primary metric** is the user conversion rate, defined as the proportion of visitors completing a predefined action (e.g., account sign-up). The experiment is designed with a **5% significance level** and **80% statistical power** to detect a **minimum detectable effect (MDE) of `r pts(fr$mde)` percentage points**.
+
+This report applies both **Frequentist** and **Bayesian** inferential frameworks. The Frequentist approach relies on classical hypothesis testing using proportions, confidence intervals, and p-values. The Bayesian approach models uncertainty through posterior distributions and evaluates the probability that the treatment outperforms the control under the observed data.
+
+The goal is to derive evidence-based recommendations that guide landing page deployment, optimizing for both **statistical rigor** and **business decision-making** under uncertainty.
+
+## 2. Introduction: Concepts, Context, and Roadmap
+
+This project investigates a central question in conversion rate optimization:<br>
+**Does a redesigned landing page improve user conversion compared to the existing version?**
+
+To explore this, we simulate an experiment using a publicly available dataset from Udacity's A/B testing course. Although the experiment was not conducted firsthand, we reconstruct its context and structure analytically to reflect what a proper real-world experiment would look like.
+
+### Report Structure: {.tight}
+
+This report is structured as follows:
+
+- <span class="t">Theoretical Background</span>A concise overview of A/B testing principles, hypothesis testing frameworks, and key statistical concepts.
+- <span class="t">Simulated Experiment Reconstruction</span>Details of the simulated setup, including randomization, assumptions, success criteria, sample size planning, and validity checks.
+- <span class="t">Data Preparation</span>Initial exploration, cleaning, and transformation of the dataset to ensure consistency, remove anomalies, and construct relevant variables for analysis.
+- <span class="t">Frequentist Analysis</span>Application of classical hypothesis tests, confidence intervals, and validation of assumptions.
+- <span class="t">Bayesian Analysis</span>Probabilistic modelling using Beta priors and posterior inference to quantify uncertainty and support decision-making.
+- <span class="t">Expanded Analysis: Regional Performance</span>A deeper, country-specific analysis conducted to uncover any regional performance variations.
+- <span class="t">Comparative Observations</span>Examination of agreements and divergences between Frequentist and Bayesian results, with practical implications.
+- <span class="t">Conclusion and Recommendations</span>Synthesis of findings and guidance for future testing and deployment.
+
+## 3. Theoretical Background
+
+A/B testing is a controlled experimental methodology used to compare two variants—typically a control and a treatment group—to determine whether a proposed change has a statistically significant effect on a key performance metric. In digital contexts, this typically involves randomly assigning users to different experiences and measuring conversion outcomes to infer causal impact.
+
+### Key Concepts:
+
+- <span class="t">Randomization</span>Random assignment of users to groups eliminates selection bias and ensures group comparability under the assumption of exchangeability. This enables valid causal inference.
+- <span class="t">Hypothesis Testing</span>
+    - The **null hypothesis (H₀)** assumes no difference in conversion rates between control and treatment.
+    - The **alternative hypothesis (H₁)** posits that a difference exists, either in a one-sided or two-sided form depending on the business question.
+- <span class="t">Type I and Type II Errors</span>
+    - **A Type I error (α)** occurs when a true null hypothesis is incorrectly rejected **(false positive).** It is typically controlled at **5%**.
+    - **A Type II error (β)** occurs when a false null hypothesis fails to be rejected **(false negative).** The **statistical power** of a test, defined as **1−β**, is often targeted at **80%.**
+- <span class="t">Minimum Detectable Effect (MDE)</span>The smallest effect size considered practically significant. It is used in conjunction with power and significance level to determine the required sample size for the experiment.
+- <span class="t">Frequentist Inference</span>
+    - Relies on **test statistics** (e.g., z-test for proportions), **p-values**, and **confidence intervals** to assess evidence against **H₀**.
+    - A **p-value** quantifies the probability of observing a result as extreme as the one obtained, under the assumption that **H₀** is true.
+    - A **confidence interval** provides a range of plausible values for the true effect size, with a specified confidence level (e.g., 95%) under repeated sampling.
+- <span class="t">Bayesian Inference</span>
+    - Models uncertainty using **probability distributions** over unknown parameters, updating **prior** beliefs with observed data via **Bayes’ theorem**.
+    - The **posterior distribution** reflects updated beliefs about the true conversion rates and the treatment effect.
+    - **Credible intervals** represent ranges within which the parameter lies with a specified posterior probability (e.g., 95%).
+    - Decision-making can be guided by evaluating the **posterior probability** that the treatment outperforms control, yielding more intuitive probabilistic conclusions.
+
+### Primary Metric:
+
+- <span class="t">Conversion Rate</span>The proportion of users in each group who complete a predefined target action (e.g., account sign-up). This is a binary outcome summarized as a proportion, suitable for both proportion-based hypothesis testing and Beta-Binomial modelling in the Bayesian framework.
+
+## 4. Simulated Experiment Reconstruction
+
+### Goal of the Experiment:
+
+To evaluate whether a **new landing page** increases the **conversion rate** compared to the existing **old landing page**.
+
+### A. Experiment Overview
+
+<table class="kv">
+<tr><th>Feature</th><th>Value</th></tr>
+<tr><td>Population Size</td><td>`r comma(n_raw)` logged rows from `r comma(n_users)` unique users</td></tr>
+<tr><td>Groups (after cleaning)</td><td>Treatment (new page): `r comma(n_treatment)` users<br>Control (old page): `r comma(n_control)` users</td></tr>
+<tr><td>Conversion Metric</td><td>Binary converted column (1 if converted, else 0)</td></tr>
+<tr><td>Conversion Rate</td><td>Control: `r pct(fr$conv_control)`<br>Treatment: `r pct(fr$conv_treatment)`</td></tr>
+<tr><td>Date Range</td><td>`r short_date(dates[1])` → `r short_date(dates[2])` (`r n_days` days)</td></tr>
+</table>
+
+### B. Experiment Setup {.bold}
+
+<table class="kv">
+<tr><th>Component</th><th>Details</th></tr>
+<tr><td>Objective</td><td>Test if the new landing page leads to significantly different conversion than the old one.</td></tr>
+<tr><td>Primary Metric</td><td>Conversion rate (binary outcome: converted)</td></tr>
+<tr><td>Secondary<br>Metrics</td><td>Session duration (if available), bounce rate (not in dataset, could be suggested for future experiments)</td></tr>
+<tr><td>Hypotheses</td><td><p><b>- Null</b>: p_new = p_old</p><p><b>- Alternative</b>: p_new ≠ p_old (two-sided)</p><p><b>- Significance Level:</b> α = 0.05</p><p><b>- Power:</b> 80%</p><p><b>- Minimum Detectable Effect (MDE):</b> `r pts(fr$mde)` percentage points</p><p><b>- Randomization Unit:</b> user_id</p><p><b>- Randomization Mechanism:</b> 50-50 random assignment to treatment or control group</p><p><b>- Assignment Logic:</b> Users assigned to either control (old page) or treatment (new page) group, and saw corresponding landing page</p></td></tr>
+</table>
+
+### C. Sample Size Calculation Assumptions {.bold}
+
+- **Baseline Conversion Rate (control):** ~`r pct(fr$conv_control)`
+- **Target Lift:** +`r pts(fr$mde)` percentage points (e.g., increase from `r pct(fr$conv_control)` to `r pct(fr$conv_control + fr$mde)`)
+- **Significance Level**: 0.05
+- **Power:** 0.8
+
+Note: Sample size was not planned prospectively in this dataset. These values reflect what would have been required had the experiment been prospectively designed under the listed assumptions.
+
+<table class="kv">
+<tr><th>Feature</th><th>Value</th></tr>
+<tr><td>Traffic Allocation</td><td>~50% to each group</td></tr>
+<tr><td>Unit of Analysis</td><td>Individual users (one row per user after cleaning; user-level randomization)</td></tr>
+<tr><td>Landing Pages</td><td>old_page, new_page</td></tr>
+</table>
+
+### D. Experiment Validity Checks {.bold}
+
+These checks were run on the cleaned data before interpreting the results:
+
+- **Sample ratio mismatch**: a chi-square test of the group sizes (`r comma(n_control)` vs `r comma(n_treatment)`) against a 50/50 split gives p = `r fmt(srm_p, 2)`, so the planned split held.
+- **Group/page mismatches**: `r comma(nrow(mismatched))` rows (`r pct(nrow(mismatched) / n_raw, 1)` of the raw data) show a group and landing page that disagree. These rows were removed (see Data Preparation), and a sensitivity check confirms they do not change the result.
+- **Novelty effect**: the treatment effect is stable across the experiment weeks (table below), so there is no sign of an effect that fades or grows over time.
+- **Randomization check**: beyond group sizes, no user-level covariates (e.g., device, demographics) are available, so balance on other characteristics cannot be validated directly.
+- **No significant peeking or early stopping**: Assume one-time evaluation
+
+```{r weekly-table, results = "asis"}
+week_days <- ab_data |>
+  mutate(week = as.integer(as_date(timestamp) - min(as_date(timestamp))) %/% 7 + 1) |>
+  group_by(week) |>
+  summarise(days = n_distinct(as_date(timestamp)))
+rows <- weekly |>
+  left_join(week_days, by = "week") |>
+  mutate(label = ifelse(days < 7, paste0(week, " (", days, " days)"), as.character(week)),
+         row = paste0("<tr><td>", label, "</td><td class=\"n\">", comma(n_control),
+                      "</td><td class=\"n\">", comma(n_treatment),
+                      "</td><td class=\"n\">", pct(rate_control),
+                      "</td><td class=\"n\">", pct(rate_treatment),
+                      "</td><td class=\"n\">", pts(delta), " pp</td></tr>"))
+cat('<table class="grid">',
+    "<tr><th>Week</th><th>Control users</th><th>Treatment users</th><th>Control rate</th><th>Treatment rate</th><th>Difference</th></tr>",
+    rows$row, "</table>", sep = "\n")
+```
+
+Note: The mismatched rows were removed at row level, not user level. Every one of the `r comma(nrow(affected))` affected users also has a matching row, so they remain in the main analysis: `r comma(sum(affected$both_pages))` of them saw both pages and `r comma(sum(!affected$both_pages))` saw one page under both group labels. Re-running the test without these users gives a difference of `r pts(both_pages$delta)` pp (p = `r fmt(both_pages$p_value, 2)`, 95% CI `r interval(both_pages$conf_interval, 5)`), which leads to the same decision.
+
+### E. Realistic Simulated Experiment Narrative {.bold}
+
+"We simulate a controlled online **A/B test** conducted over `r n_days` days (`r format(dates[1], "%b")` `r as.integer(format(dates[1], "%d"))`–`r as.integer(format(dates[2], "%d"))`, `r format(dates[2], "%Y")`) to evaluate a new landing page design. Users were randomly assigned to either the **treatment group (new page)** or the **control group (old page)**, and their conversions were recorded as **binary** outcomes. The experiment targeted a **minimum detectable effect of `r pts(fr$mde)` percentage points**, with **80% power** and a **5% significance level**. In total, **`r comma(n_raw)` rows** were logged, and after cleaning **`r comma(n_users)` unique users** form the basis of our analysis."
+
+## 5. Data Preparation
+
+### Exploratory Data Analysis (EDA):
+
+- <span class="t">Data Structure</span>
+    - **user_id:** Unique identifier per user.
+    - **timestamp:** Date and time of the user's visit.
+    - **group:** Assigned experimental condition (control or treatment).
+    - **landing_page:** Page version seen (old or new).
+    - **converted:** Binary indicator of conversion (1 = converted, 0 = not converted).
+- <span class="t">Data summary</span>
+    - The A/B test spanned `r n_days` days (`r format(dates[1], "%B")` `r as.integer(format(dates[1], "%d"))`–`r as.integer(format(dates[2], "%d"))`, `r format(dates[2], "%Y")`).
+    - Before cleaning, the control and treatment groups contain `r comma(sum(ab_raw$group == "control"))` and `r comma(sum(ab_raw$group == "treatment"))` rows, respectively.
+    - The old and new landing pages appear `r comma(sum(ab_raw$landing_page == "old_page"))` and `r comma(sum(ab_raw$landing_page == "new_page"))` times. These counts differ from the group counts, indicating group-page mismatches.
+    - The overall conversion rate across all rows is approximately `r pct(mean(ab_raw$converted))`.
+- <span class="t">Missing Values</span>`r if (sum(is.na(ab_raw)) == 0) "No missing values were detected during preliminary checks." else paste(sum(is.na(ab_raw)), "missing values were detected.")`
+- <span class="t">Initial Group and Landing Page Distributions</span>Inspection of the group and landing page distributions revealed imbalances due to mismatches between assigned groups and observed landing pages.
+
+### Data Cleaning & Feature Engineering:
+
+- <span class="t">Mismatch Removal</span>`r comma(control_mismatch)` control-group rows landed on the new page, and `r comma(treatment_mismatch)` treatment-group rows landed on the old page. These `r comma(nrow(mismatched))` rows were excluded to preserve the integrity of the experimental design. Each affected user also has a matching row, so the users themselves remain in the analysis; a sensitivity check without them is reported in Section 4D.
+- <span class="t">Duplicate Removal</span>After mismatch removal, a duplicate entry remained for user_id `r paste(duplicate_ids, collapse = ", ")`. The earliest exposure was kept, leaving one row per user: `r comma(n_users)` users in total.
+- <span class="t">Variance Stability Across Groups</span>The outcome variance is consistent between the treatment and control groups, so the pooled z-test is appropriate. For a binary outcome the variance follows from the conversion rate, so this is not separate evidence about randomization; the sample ratio check in Section 4D covers the group split.
+- <span class="t">Post-cleaning Distributions</span>User allocation between groups remained stable and balanced after mismatch removal (`r comma(n_control)` control, `r comma(n_treatment)` treatment). Landing page distributions also reflected correct assignment post-cleaning.
+
+```{r counts}
+plot_group_counts(ab_data)
+plot_page_counts(ab_data)
+```
+
+- <span class="t">Conversion Rate Analysis</span>The control group had a conversion rate of `r pct(fr$conv_control)`, while the treatment group had a rate of `r pct(fr$conv_treatment)`. Conversion rates by landing page match those by group, confirming consistency after cleaning.
+
+```{r conversion-rate}
+plot_conversion_rate(ab_data)
+```
+
+- <span class="t">Dataset Limitations</span>Due to dataset constraints, no additional user-level covariates (e.g., demographics, device type) are available to assess the randomization balance beyond group sizes. This limits the ability to fully rule out potential confounding, though data integrity checks (duplicate removal, sample ratio, timestamp consistency) support the validity of the analysis.
+- <span class="t">Temporal Trends</span>Daily group allocation remained consistent across the experiment. Conversion rates fluctuated over time: the control group peaked on `r extreme("control", which.max)` and bottomed on `r extreme("control", which.min)`. The treatment group peaked on `r extreme("treatment", which.max)` and was lowest on `r extreme("treatment", which.min)`. These fluctuations appear random and do not indicate systematic bias.
+
+```{r daily}
+plot_daily_allocation(ab_data)
+plot_daily_rate(ab_data)
+```
+
+## 6. Frequentist Analysis
+
+### Define the Problem and Formulate Hypotheses:
+
+- <span class="t">Research Question</span>Test if the new landing page leads to significantly different conversion than the old one.
+- <span class="t">Stating Hypotheses</span>
+    - **Null hypothesis (H₀):** The new landing page leads to no different conversion than the old one.
+    - **Alternative hypothesis (H₁):** The new landing page leads to significantly different conversion than the old one.
+
+### Power Analysis Setup:
+
+- **Baseline conversion rate (p₁):** `r pct(fr$conv_control)` (`r fmt(fr$conv_control, 4)`)
+- **Target conversion rate (p₂ = p₁ + MDE):** `r pct(fr$conv_control + fr$mde)` (`r fmt(fr$conv_control + fr$mde, 4)`)
+- **Minimum Detectable Effect (MDE):** `r pts(fr$mde)` percentage points absolute uplift planned (from `r pct(fr$conv_control)` to `r pct(fr$conv_control + fr$mde)`)
+- **Significance level (α):** 0.05 (two-sided)
+- **Power:** 80%
+- **Required sample size per group:** ≈ `r comma(required_n)`
+- **Actual sample sizes:** `r comma(n_control)` (control), `r comma(n_treatment)` (treatment), well above the minimum
+
+### Observed results:
+
+- **Observed conversion rates**: `r pct(fr$conv_control)` (control), `r pct(fr$conv_treatment)` (treatment).
+- **Observed difference**: treatment conversion is `r pts(abs(fr$delta))` percentage points `r if (fr$delta < 0) "lower" else "higher"` than control (`r fmt(fr$delta, 4)`).
+- **Pooled proportion:** pp ≈ `r fmt(pooled, 4)`
+- **Standard error:** SE ≈ `r fmt(fr$std_error, 4)`
+- **Test statistic:** z ≈ `r fmt(fr$z_score, 2)`
+- **Corresponding two-sided p-value:** ≈ `r fmt(fr$p_value, 2)`
+- **95% Confidence Interval:** `r interval(fr$conf_interval, 5)`
+
+### Interpretation:
+
+- Despite large sample sizes and sufficient statistical power to detect the pre-specified minimum detectable effect (MDE), the observed uplift in conversion was **negative** (`r pts(fr$delta)` percentage points) and **not statistically significant**.
+- The **95% confidence interval** for the difference in conversion rates **(`r pts(fr$conf_interval[1], 2, TRUE)` to `r pts(fr$conf_interval[2], 2, TRUE)` percentage points)** includes **zero**, indicating that the observed effect may be due to chance.
+- The upper end of the interval (`r pts(fr$conf_interval[2], 2, TRUE)` percentage points) lies far below the planned MDE of +`r pts(fr$mde)` percentage points. A lift of the planned size is therefore **ruled out**, not merely undetected.
+- The **p-value exceeds the 5% significance threshold**, providing **no statistical evidence** to reject the null hypothesis of equal conversion rates between control and treatment groups.
+- **The treatment does not lead to a measurable improvement in conversion**. If anything, it may have a slight detrimental effect — but this effect is both **small in magnitude** and **statistically indistinguishable from random variation**.
+
+## 7. Bayesian Analysis
+
+- <span class="t">Set prior distributions</span>We assume uninformative priors for both group conversion rates:
+    - pc ∼ Beta(1,1)
+    - pt ∼ Beta(1,1)
+
+Note: We use Beta(1,1) as a flat, uninformative prior, reflecting no prior knowledge and letting the data dominate. In smaller samples, a weakly informative prior can improve stability and guard against implausible estimates. Here, large sample sizes justify a noncommittal choice.
+
+- <span class="t">Posterior distributions</span>Upon observing the data:
+    - pc∣data ∼ Beta(`r whole(post_c[1])`, `r whole(post_c[2])`)
+    - pt∣data ∼ Beta(`r whole(post_t[1])`, `r whole(post_t[2])`)
+- <span class="t">Sample from posteriors</span>To approximate the posterior distribution of the difference in conversion rates, we draw (with a fixed random seed, so the results are reproducible):
+    - `r comma(length(bay$diff))` samples from Beta(`r whole(post_c[1])`, `r whole(post_c[2])`) for the control group.
+    - `r comma(length(bay$diff))` samples from Beta(`r whole(post_t[1])`, `r whole(post_t[2])`) for the treatment group.
+- **Compute the elementwise difference:** This provides a Monte Carlo approximation of the posterior distribution of the **treatment effect**, δ = pt − pc. The posterior distribution of the difference in conversion rates is shown below.
+
+```{r posterior}
+plot_posterior(bay)
+```
+
+- **Summary statistics**
+    - Posterior probability that treatment outperforms control: P(pt > pc) ≈ `r pct(bay$delta, 1)`
+    - 95% credible interval for pt − pc: `r interval(bay$cred_int, 4)`
+    - Posterior probability that the lift reaches the planned MDE (+`r pts(fr$mde)` percentage points): ≈ `r pct(bay$p_mde, 0)`
+- **Region of Practical Equivalence (ROPE):**<br>We define a **ROPE** around zero to represent effect sizes considered practically negligible
+    - **ROPE:** [−0.003, +0.003]
+    - Posterior mass within **ROPE**: ~`r pct(bay$rc, 1)`
+
+Note: The ROPE threshold was selected based on practical significance—i.e., changes smaller than ±0.3 percentage points are not actionable given cost, risk, and impact. This allows us to assess not just *whether* there’s a difference, but whether it’s **meaningful**.
+
+### Interpretation:
+
+- Only ~`r pct(bay$delta, 1)` of the posterior distribution lies above zero, providing **weak evidence** in favour of the treatment.
+- The **95% credible interval `r interval(bay$cred_int, 4)`** is **centred slightly below zero** and includes both practically negative and practically null effects. This implies that the treatment may be slightly worse than control or have no real effect.
+- With ~`r pct(bay$rc, 1)` of the posterior mass within the ROPE and essentially no chance of reaching the planned MDE, we have **moderate evidence** that the new page's effect is too small to be meaningful, providing a quantitative basis for the decision not to deploy it.
+
+## 8. Expanded Analysis: Regional Performance
+
+While the overall A/B test showed no significant difference, a deeper, country-specific analysis was conducted to uncover any regional performance variations. Country data were joined to the cleaned users with `r if (nrow(ab_data_exp) == n_users) "no users lost" else paste(comma(n_users - nrow(ab_data_exp)), "users lost")`. Each country was analysed with a Bayesian posterior comparison and a Frequentist z-test, with a Holm correction for testing `r length(country_names)` countries. The Canadian segment is the smallest (`r comma(sum(ab_data_exp$country == "CA"))` users), so its estimates are the least precise.
+
+Our analysis of the new page's conversion rate in each country revealed the following:
+
+```{r country-table, results = "asis"}
+rows <- vapply(country_names, function(name) {
+  b <- by_country[[name]]
+  f <- freq_by_country[name, ]
+  paste0("<tr><td>", name, "</td><td class=\"n\">", comma(f$n_control + f$n_treatment),
+         "</td><td class=\"n\">", pts(f$delta, 2, TRUE), " pp",
+         "</td><td class=\"n\">", pct(b$delta, 1),
+         "</td><td>", interval(b$cred_int, 5),
+         "</td><td class=\"n\">", pct(b$rc, 1),
+         "</td><td class=\"n\">", fmt(f$p_value, 2),
+         "</td><td class=\"n\">", fmt(f$p_holm, 2), "</td></tr>")
+}, character(1))
+cat('<table class="grid small">',
+    "<tr><th>Country</th><th>Users</th><th>Difference</th><th>P(new better)</th><th>95% credible interval</th><th>ROPE</th><th>p-value</th><th>Holm p</th></tr>",
+    rows, "</table>", sep = "\n")
+```
+
+No country shows a statistically significant effect, even before the correction. A logistic regression test of whether the treatment effect differs by country (treatment × country interaction) gives p = `r fmt(country_freq$interaction_p, 2)`, so there is no evidence that the new page performs differently in any region.
+
+The UK's `r pct(by_country$UK$delta, 1)` probability of improvement should not be read as evidence of a lift: its credible interval is wide and centred close to zero, and its z-test p-value is `r fmt(uk$p_value, 2)`. With `r length(country_names)` noisy country estimates, one of them leaning positive is not surprising by chance alone. The low ROPE coverage in Canada is a result of the smaller sample size, which leads to a wider credible interval and higher uncertainty, not a sign of a meaningful effect.
+
+## 9. Comparative Observations
+
+### Post-Hoc Observations and Power (Frequentist Analysis):
+
+Frequentist hypothesis testing revealed no statistically significant difference between the treatment and control groups. The observed `r pts(fr$delta)` percentage point difference in conversion rates is far from the pre-specified minimum detectable effect (MDE) of +`r pts(fr$mde)` percentage points, and the associated p-value of `r fmt(fr$p_value, 2)` exceeds the conventional 5% significance threshold.
+
+The 95% confidence interval for the difference in conversion rates `r interval(fr$conf_interval, 5)` includes zero and skews negative, reinforcing the lack of statistical evidence for a meaningful treatment effect. The experiment was not underpowered: it had roughly `r round(min(n_control, n_treatment) / required_n)` times the sample needed to detect the planned MDE, and the interval excludes a lift of that size.
+
+From a decision-making perspective, these results provide no justification to implement the treatment. The evidence supports a conservative stance: the new page is unlikely to outperform the current version, and it may even slightly underperform. In light of these findings, the prudent course is to halt rollout and re-evaluate the proposed changes.
+
+### Post-Hoc Observations and Decision Limits (Bayesian Analysis):
+
+Posterior inference yielded a `r pct(bay$delta, 1)` probability that treatment outperforms control, and a 95% credible interval of `r interval(bay$cred_int, 4)`, which includes zero and skews negative.
+
+Using a ROPE of ±0.3 percentage points, approximately `r pct(bay$rc, 1)` of the posterior mass falls within this region. This suggests that the treatment effect is likely inconsequential from a business perspective.
+
+In Bayesian terms, this does not provide evidence in favour of the treatment. Rather, it provides moderate evidence for practical equivalence — i.e., that the new page is no better (and possibly worse) than the old.
+
+Although Bayesian methods avoid binary hypothesis testing, this result supports the same operational decision: there is insufficient evidence to justify deploying the new page. The minor `r pts(fr$delta)` percentage point observed drop, combined with high ROPE coverage and low probability of improvement, points toward conservatism and re-evaluation rather than rollout.
+
+## 10. Conclusion and Recommendations
+
+### Decision: {.tight}
+
+**Do not deploy** the new landing page at this time.
+
+### Reasoning:
+
+- Both **Frequentist** (p-value = `r fmt(fr$p_value, 2)`, CI includes 0) and **Bayesian** (P(pt > pc) ≈ `r pct(bay$delta, 1)`) results suggest that the new page **does not improve conversion** — and may even underperform.
+- A large share of the **posterior distribution falls within the ROPE** (Region of Practical Equivalence), indicating a high probability that the difference is practically negligible.
+- The experiment had ample power: the confidence interval tops out at `r pts(fr$conf_interval[2], 2, TRUE)` percentage points, so **a lift of the planned `r pts(fr$mde)` percentage points is ruled out**.
+- The result holds under the validity checks: the 50/50 split held, the effect is stable week to week, and removing users with mismatched rows gives the same decision.
+- The expanded regional analysis supports this conclusion. No country shows a significant effect, and there is no evidence that the effect differs by country (interaction p = `r fmt(country_freq$interaction_p, 2)`). The UK's `r pct(by_country$UK$delta, 1)` probability of improvement is consistent with chance.
+
+### Next Steps:
+
+- **Keep the current page** in all markets, including the UK.
+- **Redesign and retest**: Consider changes to layout, content, or CTA strategy, and run a new A/B test if the new design justifies it, with a pre-registered MDE and a fixed horizon.
+- **Broaden your metric scope**: Track revenue per user or lifetime value alongside conversion, and secondary metrics (e.g., session duration, click-throughs, bounce rate) to better understand user engagement beyond binary conversion.
+- **Cost-benefit assessment**: Evaluate whether pursuing further design iterations is worth the **engineering cost, opportunity cost, and potential lift**.
